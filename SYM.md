@@ -201,6 +201,15 @@ Rather than seeing only results, advisors gain visibility into the research jour
 
 ---
 
+# Communication and Feedback
+
+Traditional educational feedback is constrained by schedules, geography, and limited instructor availability. Office hours require both educator and student to be available simultaneously, often resulting in inefficient use of time and repeated discussions of similar topics.
+
+SYW enables asynchronous review of work in progress. Educators can comment on specific revisions, provide references, and guide students while ideas are still developing rather than after submission. Students receive feedback in context and can revisit it at any time.
+
+This transforms feedback from an event into an ongoing process. Instead of waiting for scheduled interactions, educators and students communicate through the evolving work itself. The document history becomes a shared workspace where guidance, revision, and learning occur continuously.
+
+---
 # AI and SYW
 
 SYW is not an anti-AI system, it assumes AI is here to stay.  Rather than attempting to prohibit AI, SYW places AI into context by becoming another source of input alongside:
@@ -356,3 +365,7 @@ The history tells us how someone learned, reasoned, explored, revised, and ultim
 That history is often the most valuable part of the work.
 
 ---
+
+> "Show your work" has been one of the most effective educational principles for generations.
+>
+> SYW extends that principle from mathematics to all forms of intellectual creation.
