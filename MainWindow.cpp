@@ -1,3 +1,7 @@
+/**
+ * @file MainWindow.cpp
+ * @brief Implementation of the Qt front end. See MainWindow.h for the hook table.
+ */
 #include "MainWindow.h"
 
 #include <QAction>
@@ -13,6 +17,16 @@
 #include <QPlainTextEdit>
 #include <QStatusBar>
 
+/**
+ * @details Creates the (initially disabled, read-only) log pane, builds the menu, wires the SYW hooks and
+ * connects three signals:
+ *  - QProcess::finished -> warn if the editor crashed or returned non-zero, then SYW::Exit(),
+ *  - QFileSystemWatcher::fileChanged -> restart the debounce timer,
+ *  - debounce timeout -> SYW::Save().
+ *
+ * LibreOffice saves by writing a temporary file and renaming it, which drops the path from the watcher;
+ * that is why SYW::OnSaved re-arms it (see watchFile()).
+ */
 MainWindow::MainWindow(SYW& s, QWidget* parent)
     : QMainWindow(parent), syw(s)
 {
@@ -49,6 +63,7 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     connect(&debounce, &QTimer::timeout, this, [this]() { syw.Save(); });
 }
 
+/// @details **File > Open...** (standard Open shortcut) calls SYW::Open(); **File > Quit** closes the window.
 void MainWindow::buildMenu()
 {
     QMenu* file = menuBar()->addMenu("&File");
@@ -64,6 +79,11 @@ void MainWindow::buildMenu()
     connect(quit, &QAction::triggered, this, &QWidget::close);
 }
 
+/**
+ * @details Hooks that report failure (Shell, LaunchEditor) pass the exit code or PID back to SYW and put the
+ * description in `Error` (via SYW::SetErr), so the error contract holds across the GUI boundary.
+ * Command lines are split with QProcess::splitCommand(), so templates must quote paths containing spaces.
+ */
 void MainWindow::wireSyw()
 {
     syw.GetFileName = [this]() {
@@ -148,6 +168,7 @@ void MainWindow::wireSyw()
     syw.Quit = []() { QApplication::quit(); };
 }
 
+/// @details Adds SYW::CurrentFile to the watcher if it exists and is not already watched.
 void MainWindow::watchFile()
 {
     const QString path = QString::fromUtf8(syw.CurrentFile);
@@ -155,11 +176,16 @@ void MainWindow::watchFile()
     if (QFileInfo::exists(path)) watcher.addPath(path);
 }
 
+/// @details Replaces the contents of the log pane with SYW::LogText (UTF-8).
 void MainWindow::showLog()
 {
     text->setPlainText(QString::fromUtf8(syw.LogText.c_str()));
 }
 
+/**
+ * @details Disconnects the editor's `finished` handler first so the shutdown is handled here exactly once
+ * (otherwise the terminated editor would trigger a second SYW::Exit()).
+ */
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     if (editorProc.state() != QProcess::NotRunning) {

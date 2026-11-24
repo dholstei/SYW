@@ -1,3 +1,9 @@
+/**
+ * @file SYW.cpp
+ * @brief SYW core implementation and the Qt application entry point (main()).
+ *
+ * The API is documented in SYW.h; the comments here describe how each part is implemented.
+ */
 #include "SYW.h"
 #include "MainWindow.h"
 
@@ -9,6 +15,12 @@
 #include <QApplication>
 #include <QMessageBox>
 
+/**
+ * @brief Definition of the error publisher (declared in Error.h).
+ *
+ * @details This definition satisfies the linker and gives a CLI behaviour: print level, message and
+ * data with printf(). The Qt application replaces it once, at the top of main(), with a popup.
+ */
 // CLI default: print the error. main() replaces this with a Qt popup.
 std::function<void(const Error&)> Error::Publisher = [](const Error& e) {
     printf("%s: %s", LvlStr(e.level).c_str(), e.msg.c_str());
@@ -16,6 +28,21 @@ std::function<void(const Error&)> Error::Publisher = [](const Error& e) {
     printf("\n");
 };
 
+/**
+ * @brief Application entry point.
+ *
+ * @details
+ *  1. Creates the QApplication.
+ *  2. Replaces Error::Publisher with a QMessageBox (icon by level, `msg` as the text, `data` as the
+ *     detail text).
+ *  3. Creates the SYW session and the MainWindow, which wires the SYW hooks to Qt.
+ *  4. Handles the optional `--file <path>` argument by calling SYW::Open().
+ *  5. Runs the Qt event loop until SYW::Quit is called.
+ *
+ * @param argc Argument count.
+ * @param argv Arguments. Supported: `--file <path>` (open that document at startup).
+ * @returns The exit code of the Qt event loop.
+ */
 int main(int argc, char** argv) {
     // Build Qt infrastructure and initialize the application
     QApplication app(argc, argv);
@@ -55,6 +82,10 @@ SYW::~SYW()
 {
 }
 
+/**
+ * @details Formats `fmt` into a 2 KiB buffer with vsnprintf() (truncating), then fills `err.level`,
+ * `err.msg` and `err.data`. Does not publish.
+ */
 void SYW::SetErr(lvl level, const char* msg, const char* fmt, ...)
 {
     char buf[2048];
@@ -71,6 +102,11 @@ void SYW::SetErr(lvl level, const char* msg, const char* fmt, ...)
     err.data = buf;
 }
 
+/**
+ * @details Uses `goto done` so that every exit path, success or failure, publishes `err` exactly once.
+ * On any failure after @ref CurrentFile was set, it is cleared again so the session returns to "no file
+ * open". Command lines are built with snprintf() and checked for truncation.
+ */
 void SYW::Open(const std::string& file)
 {
     std::string abs;
@@ -136,6 +172,13 @@ done:
     MSG_ERR(err);
 }
 
+/**
+ * @details Uses `goto refresh` (skip committing, still refresh the log) and `goto done` (stop, report).
+ * The commit message is written to `syw-commit-msg.tmp` in the current directory and passed with
+ * `git commit -F`, which avoids shell escaping of quotes and newlines; the file is removed afterwards,
+ * also on failure. Exit codes from `git diff --cached --quiet`: 0 = nothing to commit, 1 = changes,
+ * anything else = error.
+ */
 void SYW::Save()
 {
     std::string base, out, msg;
@@ -230,6 +273,9 @@ done:
     MSG_ERR(err);
 }
 
+/**
+ * @details Save() publishes its own error, so Exit() always proceeds to clear EditorPID and quit.
+ */
 void SYW::Exit()
 {
     Save();
@@ -237,6 +283,11 @@ void SYW::Exit()
     Quit();
 }
 
+/**
+ * @details `git rev-parse --show-toplevel` distinguishes "could not run git" (exit code -1) from "not a
+ * repository" (any other non-zero code, with git's own message in `err.data`). When `git log` fails,
+ * `git rev-parse --verify --quiet HEAD` (exit code 1 = no HEAD) identifies a repository with no commits.
+ */
 bool SYW::RefreshLog()
 {
     std::string top, log;
