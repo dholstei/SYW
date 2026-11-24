@@ -15,12 +15,16 @@
 #include <QMenuBar>
 #include <QSet>
 #include <QStatusBar>
+#include <QTextBrowser>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 
 namespace {
 /// Kind of a tree item, stored in `Qt::UserRole + 1`.
 enum ItemKind { KindBranch = 0, KindCommit = 1, KindFile = 2 };
+
+/// Extra per-item data on file items (`Qt::UserRole + n`).
+enum FileData { RoleHash = Qt::UserRole + 2, RolePath = Qt::UserRole + 3, RoleStatus = Qt::UserRole + 4 };
 }
 
 /**
@@ -43,6 +47,7 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     tree->setColumnCount(3);
     tree->setHeaderLabels({"Branch / Commit / File", "Date", "Author"});
     tree->setUniformRowHeights(true);
+    tree->setSelectionMode(QAbstractItemView::ExtendedSelection);   // Ctrl/Shift: pick two snapshots later
     new QTreeWidgetItem(tree, QStringList("Open a file to launch the editor."));
     tree->setEnabled(false);              // active only while an editor is running
     setCentralWidget(tree);
@@ -70,7 +75,11 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     connect(&debounce, &QTimer::timeout, this, [this]() { syw.Save(); });
 }
 
-/// @details **File > Open...** (standard Open shortcut) calls SYW::Open(); **File > Quit** closes the window.
+/**
+ * @details **File > Open...** (standard Open shortcut) calls SYW::Open(); **File > Quit** closes the window.
+ * **View > Document** (disabled until a single Markdown file is selected, see updateViewActions()) calls
+ * viewDocument(). Double-clicking a Markdown file in the tree does the same.
+ */
 void MainWindow::buildMenu()
 {
     QMenu* file = menuBar()->addMenu("&File");
@@ -84,6 +93,17 @@ void MainWindow::buildMenu()
     QAction* quit = file->addAction("&Quit");
     quit->setShortcut(QKeySequence::Quit);
     connect(quit, &QAction::triggered, this, &QWidget::close);
+
+    QMenu* view = menuBar()->addMenu("&View");
+
+    viewDocumentAct = view->addAction("&Document");
+    viewDocumentAct->setEnabled(false);
+    connect(viewDocumentAct, &QAction::triggered, this, [this]() { viewDocument(); });
+
+    connect(tree, &QTreeWidget::itemSelectionChanged, this, [this]() { updateViewActions(); });
+    connect(tree, &QTreeWidget::itemDoubleClicked, this, [this]() {
+        if (viewDocumentAct->isEnabled()) viewDocument();
+    });
 }
 
 /**
@@ -205,6 +225,7 @@ void MainWindow::showTree()
 
     if (syw.Branches.empty()) {
         new QTreeWidgetItem(tree, QStringList("(no commits yet)"));
+        updateViewActions();
         return;
     }
 
@@ -240,6 +261,10 @@ void MainWindow::showTree()
                 fi->setText(0, "[" + QString::fromUtf8(f.status.c_str()) + "] " + path);
                 fi->setData(0, Qt::UserRole, ckey + "/f:" + QString::fromUtf8(f.path.c_str()));
                 fi->setData(0, Qt::UserRole + 1, KindFile);
+                // For a rename ("old<TAB>new") the file at this commit is the new name.
+                fi->setData(0, RoleHash, hash);
+                fi->setData(0, RolePath, QString::fromUtf8(f.path.c_str()).section('\t', -1));
+                fi->setData(0, RoleStatus, QString::fromUtf8(f.status.c_str()));
             }
             ci->setExpanded(expanded.contains(ckey));
         }
@@ -247,6 +272,53 @@ void MainWindow::showTree()
     }
 
     for (int col = 0; col < tree->columnCount(); ++col) tree->resizeColumnToContents(col);
+    updateViewActions();
+}
+
+/**
+ * @details Looks at the tree selection. **Document** is enabled when exactly one item is selected, it is a
+ * file item, its path ends in `.md` (case-insensitive) and its status is not `D` (a deleted file does not
+ * exist in that commit). The tree is rebuilt after every save, which clears the selection, so this also runs
+ * at the end of showTree().
+ */
+void MainWindow::updateViewActions()
+{
+    const QList<QTreeWidgetItem*> sel = tree->selectedItems();
+    bool doc = false;
+
+    if (sel.size() == 1 && sel[0]->data(0, Qt::UserRole + 1).toInt() == KindFile) {
+        const QString path = sel[0]->data(0, RolePath).toString();
+        const QString status = sel[0]->data(0, RoleStatus).toString();
+        doc = path.endsWith(".md", Qt::CaseInsensitive) && !status.startsWith('D');
+    }
+    viewDocumentAct->setEnabled(doc);
+}
+
+/**
+ * @details Fetches the file with SYW::FileAtCommit() (errors are already published there) and shows it in a
+ * QTextBrowser that is its own top-level window: non-modal, deleted when closed, and parented to the main
+ * window so it goes away with it. QTextBrowser::setMarkdown() renders CommonMark/GitHub-style Markdown, so
+ * pandoc-specific extensions may not render perfectly. Links are not followed.
+ */
+void MainWindow::viewDocument()
+{
+    const QList<QTreeWidgetItem*> sel = tree->selectedItems();
+    if (sel.size() != 1 || !viewDocumentAct->isEnabled()) return;
+
+    const QString hash = sel[0]->data(0, RoleHash).toString();
+    const QString path = sel[0]->data(0, RolePath).toString();
+
+    std::string content;
+    if (!syw.FileAtCommit(hash.toStdString(), path.toUtf8().constData(), content)) return;
+
+    QTextBrowser* viewer = new QTextBrowser(this);
+    viewer->setWindowFlag(Qt::Window);
+    viewer->setAttribute(Qt::WA_DeleteOnClose);
+    viewer->setOpenLinks(false);
+    viewer->setWindowTitle(path + " @ " + hash);
+    viewer->setMarkdown(QString::fromUtf8(content.c_str()));
+    viewer->resize(700, 800);
+    viewer->show();
 }
 
 /**

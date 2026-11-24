@@ -7,6 +7,7 @@
 #include "SYW.h"
 #include "MainWindow.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
@@ -409,4 +410,55 @@ bool SYW::RefreshLog()
     RepoRoot = top;
     CurrentBranch = cur;
     return true;
+}
+
+/**
+ * @details The arguments end up inside a double-quoted command line, so they are validated first: the hash
+ * must be 1-64 hexadecimal digits, the path non-empty and free of `"` and `\`. `git show` output (which
+ * the Shell hook merges with stderr) is returned in `content` on success; on failure it is the error text
+ * and goes into `err.data` instead. Uses `goto done` like the other operations so `err` is published once.
+ */
+bool SYW::FileAtCommit(const std::string& hash, const std::string& path, std::string& content)
+{
+    char cmd[8192];
+    size_t i;
+    int n, rc;
+    bool ok = false;
+
+    err = Error();
+    content.clear();
+
+    if (hash.empty() || hash.size() > 64) {
+        SetErr(ERR, "Invalid commit hash", "\"%s\"", hash.c_str());
+        goto done;
+    }
+    for (i = 0; i < hash.size(); ++i) {
+        if (!isxdigit((unsigned char)hash[i])) {
+            SetErr(ERR, "Invalid commit hash", "\"%s\"", hash.c_str());
+            goto done;
+        }
+    }
+    if (path.empty() || path.find_first_of("\"\\") != std::string::npos) {
+        SetErr(ERR, "Unsupported file path", "\"%s\"", path.c_str());
+        goto done;
+    }
+
+    n = snprintf(cmd, sizeof cmd, "git show \"%s:%s\"", hash.c_str(), path.c_str());
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "git show command too long", "%s:%s", hash.c_str(), path.c_str());
+        goto done;
+    }
+
+    rc = Shell(cmd, content);
+    if (rc != 0) {
+        SetErr(ERR, rc < 0 ? "Could not run git show" : "git show failed", "exit code %d\n%s\n%s",
+               rc, cmd, content.c_str());
+        content.clear();
+        goto done;
+    }
+    ok = true;
+
+done:
+    MSG_ERR(err);
+    return ok;
 }

@@ -15,7 +15,7 @@ part of the work. The idea and goals are in [SYW.md](SYW.md). This README covers
 | File | Role |
 |------|------|
 | `SYW.h` / `SYW.cpp` | **Core** (`class SYW`) and `main()`. No GUI types in the class; everything external goes through hooks. |
-| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File menu, branch/commit/file tree, editor process, file watching. Wires the hooks. |
+| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File and View menus, branch/commit/file tree, Markdown popup viewer, editor process, file watching. Wires the hooks. |
 | `Error.h` | `Error` object, `MSG_ERR()` and the `Error::Publisher` output hook. |
 | `Makefile` | GNU make build (explicit Qt flags, `moc` rule). |
 | `SYW.md` | Design document: the "why". |
@@ -77,6 +77,14 @@ editor exits / window closes  ->  Exit(): final Save(), then Quit()
 
 Only the DOCX and its Markdown file are committed; other staged files are left alone. **Nothing is pushed.**
 
+### Viewing a snapshot
+
+Select a single `.md` file in the tree (a commit's file node) and choose **View > Document** (or double-click
+it). `SYW::FileAtCommit(hash, path, content)` runs `git show <hash>:<path>` and `MainWindow::viewDocument()`
+renders the result in a separate, non-modal window, so several snapshots can be open side by side. The action
+is enabled by `MainWindow::updateViewActions()` only for a single Markdown file that exists in its commit.
+The viewer uses `QTextBrowser::setMarkdown()`, which renders CommonMark/GitHub-style Markdown.
+
 ### Hooks (the GUI boundary)
 
 `SYW` never calls Qt. It calls these `std::function` members, which `MainWindow::wireSyw()` assigns. The
@@ -133,7 +141,7 @@ Code that calls `Open()` or `Save()` can inspect `if (syw.err)` afterwards. In t
 ## Roadmap
 
 - Actions on tree selections (view a file at a commit, diff, checkout).
-- Rendered Markdown view (`QTextBrowser::setMarkdown()`), including past revisions.
+- **View > Diff** for two selected Markdown snapshots.
 - Git actions navigation: branches, diffs, timeline.
 - `git push` once a remote is configured (`git remote add origin <url>`).
 - Repository creation from the application.

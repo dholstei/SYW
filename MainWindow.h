@@ -1,6 +1,6 @@
 /**
  * @file MainWindow.h
- * @brief Qt front end for SYW: menu, branch/commit/file tree, editor process and file watching.
+ * @brief Qt front end for SYW: menus, branch/commit/file tree, document viewer, editor process and file watching.
  */
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
@@ -12,6 +12,7 @@
 
 #include "SYW.h"
 
+class QAction;
 class QTreeWidget;
 
 /**
@@ -32,6 +33,11 @@ class QTreeWidget;
  * | GetCommitMessage  | QInputDialog::getMultiLineText()                            |
  * | OnOpened/OnSaved  | enable/refresh the @ref tree, (re-)arm @ref watcher          |
  * | Quit              | QApplication::quit()                                        |
+ *
+ * @par View menu
+ * **View > Document** is enabled only while exactly one item is selected in the @ref tree and that item is
+ * a Markdown file that exists in its commit. It opens a separate, non-modal window showing the rendered
+ * Markdown of that snapshot (SYW::FileAtCommit()); any number of these windows can be open at once.
  *
  * @par Lifecycle
  *  - **File > Open** calls SYW::Open(), which launches the editor.
@@ -60,7 +66,7 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    /// Create the **File** menu (Open, Quit).
+    /// Create the **File** menu (Open, Quit) and the **View** menu (Document).
     void buildMenu();
     /// Assign every SYW hook (see the table in the class description).
     void wireSyw();
@@ -75,8 +81,21 @@ private:
      * refreshes; on the first fill only the current branch is expanded.
      */
     void showTree();
+    /**
+     * @brief Enable or disable the View actions to match the tree selection.
+     *
+     * Called whenever the selection changes and after every rebuild of the tree.
+     */
+    void updateViewActions();
+    /**
+     * @brief Open a popup window with the rendered Markdown of the selected file at its commit.
+     *
+     * Does nothing unless exactly one Markdown file is selected. Errors are published through `syw.err`.
+     */
+    void viewDocument();
 
     SYW& syw;                       ///< The session being driven.
+    QAction* viewDocumentAct;       ///< **View > Document**; enabled by updateViewActions().
     QTreeWidget* tree;              ///< Branch > commit > file tree; enabled only while an editor is running.
     QProcess editorProc;            ///< The external editor process.
     QFileSystemWatcher watcher;     ///< Detects saves of the open file.

@@ -267,6 +267,20 @@ public:
      *          a git command failed). Unusable branch names are skipped with a WARN in @ref err.
      */
     bool RefreshLog();
+
+    /**
+     * @brief Get the contents of a file as it was in a commit (`git show <hash>:<path>`).
+     *
+     * Clears @ref err on entry and publishes it on exit, like Open() and Save().
+     *
+     * @param hash    Commit hash (abbreviated is fine); hexadecimal digits only.
+     * @param path    Path relative to the repository root, as listed in GitFile::path. Must not contain
+     *                a double quote or a backslash (the command line is split by the front end).
+     * @param content Receives the file contents (empty on failure).
+     * @returns `true` on success; `false` with @ref err set on failure (bad arguments, git could not run,
+     *          the file does not exist in that commit).
+     */
+    bool FileAtCommit(const std::string& hash, const std::string& path, std::string& content);
 };
 
 #endif // SYW_H
