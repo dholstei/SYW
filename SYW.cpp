@@ -284,15 +284,30 @@ void SYW::Exit()
 }
 
 /**
- * @details `git rev-parse --show-toplevel` distinguishes "could not run git" (exit code -1) from "not a
- * repository" (any other non-zero code, with git's own message in `err.data`). When `git log` fails,
- * `git rev-parse --verify --quiet HEAD` (exit code 1 = no HEAD) identifies a repository with no commits.
+ * @details Runs, in the current directory:
+ *  1. `git rev-parse --show-toplevel` - repository root. Distinguishes "could not run git" (exit code -1)
+ *     from "not a repository" (any other non-zero code, with git's own message in `err.data`).
+ *  2. `git symbolic-ref --short -q HEAD` - current branch (exit code 1 = detached HEAD).
+ *  3. `git for-each-ref refs/heads` - local branch names (none = a repository with no commits yet).
+ *  4. Per branch, `git log <branch> -n LogLimit --name-status` - the commits and the files each changed.
+ *
+ * The log is requested with a fixed header line per commit (`@hash|date|author|subject`) followed by
+ * `status<TAB>path` lines, and parsed with strtok() and sscanf(). Results are collected in temporaries
+ * and swapped into the members only when every step succeeded, so a failure never leaves a half-filled
+ * list. `core.quotepath=off` keeps non-ASCII file names readable.
  */
 bool SYW::RefreshLog()
 {
-    std::string top, log;
-    int rc;
+    std::string top, cur, refs, log;
+    std::vector<std::string> names;
+    std::vector<GitBranch> branches;
+    std::vector<char> buf;
+    char cmd[8192], hash[64], date[32], author[256], subject[1024], status[16], path[4096];
+    char* line;
+    int rc, n;
+    size_t i;
 
+    // 1. repository root
     rc = Shell("git rev-parse --show-toplevel", top);
     if (rc < 0) {
         SetErr(ERR, "Could not run git", "%s", top.c_str());
@@ -304,23 +319,94 @@ bool SYW::RefreshLog()
     }
     while (!top.empty() && (top.back() == '\n' || top.back() == '\r')) top.pop_back();
 
-    rc = Shell("git log --graph --decorate --date=short -n 200 --pretty=format:\"%h %ad %an  %s%d\"", log);
-    if (rc < 0) {
-        SetErr(ERR, "Could not run git log", "%s", log.c_str());
-        return false;
-    }
-    if (rc != 0) {
-        // A repository with no commits yet is not an error: the first Save() makes the initial commit.
-        // (git rev-parse --verify --quiet HEAD: exit code 1 = HEAD does not exist)
-        std::string head;
-        if (Shell("git rev-parse --verify --quiet HEAD", head) == 1) {
-            LogText = "Repository: " + top + "\n\n(no commits yet)";
-            return true;
-        }
-        SetErr(WARN, "git log failed", "%s\n%s", top.c_str(), log.c_str());
+    // 2. current branch (exit code 1: detached HEAD)
+    rc = Shell("git symbolic-ref --short -q HEAD", cur);
+    if (rc == 0) {
+        while (!cur.empty() && (cur.back() == '\n' || cur.back() == '\r')) cur.pop_back();
+    } else if (rc == 1) {
+        cur.clear();
+    } else {
+        SetErr(ERR, "git symbolic-ref failed", "exit code %d\n%s", rc, cur.c_str());
         return false;
     }
 
-    LogText = "Repository: " + top + "\n\n" + log;
+    // 3. local branches
+    rc = Shell("git for-each-ref --format=\"%(refname:short)\" refs/heads", refs);
+    if (rc != 0) {
+        SetErr(ERR, "git for-each-ref failed", "exit code %d\n%s", rc, refs.c_str());
+        return false;
+    }
+    buf.assign(refs.begin(), refs.end());
+    buf.push_back('\0');
+    for (line = strtok(buf.data(), "\n"); line; line = strtok(nullptr, "\n")) {
+        n = (int)strlen(line);
+        if (n > 0 && line[n - 1] == '\r') line[n - 1] = '\0';
+        if (line[0] == '\0') continue;
+        if (strchr(line, '"')) {
+            SetErr(WARN, "Skipping a branch with an unsupported name", "%s", line);
+            continue;
+        }
+        names.push_back(line);
+    }
+    for (i = 0; i < names.size(); ++i)          // current branch first
+        if (names[i] == cur) { std::swap(names[0], names[i]); break; }
+
+    // 4. commits and files of each branch
+    for (i = 0; i < names.size(); ++i) {
+        GitBranch b;
+        b.name = names[i];
+        b.current = (b.name == cur);
+
+        n = snprintf(cmd, sizeof cmd,
+                     "git -c core.quotepath=off log \"%s\" -n %d --name-status --date=short "
+                     "--pretty=format:\"@%%h|%%ad|%%an|%%s\" --",
+                     b.name.c_str(), LogLimit);
+        if (n < 0 || (size_t)n >= sizeof cmd) {
+            SetErr(ERR, "git log command too long", "%s", b.name.c_str());
+            return false;
+        }
+        rc = Shell(cmd, log);
+        if (rc != 0) {
+            SetErr(ERR, "git log failed", "branch %s, exit code %d\n%s", b.name.c_str(), rc, log.c_str());
+            return false;
+        }
+
+        buf.assign(log.begin(), log.end());
+        buf.push_back('\0');
+        for (line = strtok(buf.data(), "\n"); line; line = strtok(nullptr, "\n")) {
+            n = (int)strlen(line);
+            if (n > 0 && line[n - 1] == '\r') line[n - 1] = '\0';
+            if (line[0] == '\0') continue;
+
+            if (line[0] == '@') {                       // @hash|date|author|subject
+                GitCommit c;
+                subject[0] = '\0';
+                n = sscanf(line + 1, "%63[^|]|%31[^|]|%255[^|]|%1023[^\n]", hash, date, author, subject);
+                if (n < 3) {
+                    SetErr(WARN, "Unrecognised git log line", "%s", line);
+                    continue;
+                }
+                c.hash = hash;
+                c.date = date;
+                c.author = author;
+                c.subject = subject;
+                b.commits.push_back(c);
+            } else if (!b.commits.empty()) {            // status<TAB>path
+                GitFile f;
+                if (sscanf(line, "%15[^\t]\t%4095[^\n]", status, path) != 2) {
+                    SetErr(WARN, "Unrecognised git log line", "%s", line);
+                    continue;
+                }
+                f.status = status;
+                f.path = path;
+                b.commits.back().files.push_back(f);
+            }
+        }
+        branches.push_back(b);
+    }
+
+    Branches.swap(branches);
+    RepoRoot = top;
+    CurrentBranch = cur;
     return true;
 }

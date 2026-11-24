@@ -15,7 +15,7 @@ part of the work. The idea and goals are in [SYW.md](SYW.md). This README covers
 | File | Role |
 |------|------|
 | `SYW.h` / `SYW.cpp` | **Core** (`class SYW`) and `main()`. No GUI types in the class; everything external goes through hooks. |
-| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File menu, git log pane, editor process, file watching. Wires the hooks. |
+| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File menu, branch/commit/file tree, editor process, file watching. Wires the hooks. |
 | `Error.h` | `Error` object, `MSG_ERR()` and the `Error::Publisher` output hook. |
 | `Makefile` | GNU make build (explicit Qt flags, `moc` rule). |
 | `SYW.md` | Design document: the "why". |
@@ -70,7 +70,7 @@ editor saves  ->  QFileSystemWatcher  ->  500 ms debounce  ->  Save()
   git diff --cached --quiet   (nothing changed? stop)
   ask for commit message      (empty / Cancel? skip, files stay staged)
   git commit -F <msgfile> -- DOCX MD
-  git log -> log pane
+  git log per branch -> branch / commit / file tree
 
 editor exits / window closes  ->  Exit(): final Save(), then Quit()
 ```
@@ -132,6 +132,7 @@ Code that calls `Open()` or `Save()` can inspect `if (syw.err)` afterwards. In t
 
 ## Roadmap
 
+- Actions on tree selections (view a file at a commit, diff, checkout).
 - Rendered Markdown view (`QTextBrowser::setMarkdown()`), including past revisions.
 - Git actions navigation: branches, diffs, timeline.
 - `git push` once a remote is configured (`git remote add origin <url>`).

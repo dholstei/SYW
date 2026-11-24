@@ -11,14 +11,20 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFontDatabase>
 #include <QInputDialog>
 #include <QMenuBar>
-#include <QPlainTextEdit>
+#include <QSet>
 #include <QStatusBar>
+#include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
+
+namespace {
+/// Kind of a tree item, stored in `Qt::UserRole + 1`.
+enum ItemKind { KindBranch = 0, KindCommit = 1, KindFile = 2 };
+}
 
 /**
- * @details Creates the (initially disabled, read-only) log pane, builds the menu, wires the SYW hooks and
+ * @details Creates the (initially disabled) branch/commit/file tree, builds the menu, wires the SYW hooks and
  * connects three signals:
  *  - QProcess::finished -> warn if the editor crashed or returned non-zero, then SYW::Exit(),
  *  - QFileSystemWatcher::fileChanged -> restart the debounce timer,
@@ -33,12 +39,13 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     setWindowTitle("SYW");
     resize(900, 600);
 
-    text = new QPlainTextEdit(this);
-    text->setReadOnly(true);
-    text->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    text->setPlaceholderText("Open a file to launch the editor.");
-    text->setEnabled(false);              // active only while an editor is running
-    setCentralWidget(text);
+    tree = new QTreeWidget(this);
+    tree->setColumnCount(3);
+    tree->setHeaderLabels({"Branch / Commit / File", "Date", "Author"});
+    tree->setUniformRowHeights(true);
+    new QTreeWidgetItem(tree, QStringList("Open a file to launch the editor."));
+    tree->setEnabled(false);              // active only while an editor is running
+    setCentralWidget(tree);
 
     buildMenu();
     wireSyw();
@@ -46,7 +53,7 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     // Editor closed -> final save and quit.
     connect(&editorProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int code, QProcess::ExitStatus status) {
-                text->setEnabled(false);
+                tree->setEnabled(false);
                 if (status != QProcess::NormalExit || code != 0) {
                     syw.SetErr(WARN, "The editor exited abnormally", "%s, exit code %d",
                                status == QProcess::CrashExit ? "crashed" : "exited", code);
@@ -154,15 +161,15 @@ void MainWindow::wireSyw()
     };
 
     syw.OnOpened = [this]() {
-        text->setEnabled(true);
+        tree->setEnabled(true);
         statusBar()->showMessage("Editing " + QString::fromUtf8(syw.CurrentFile));
         watchFile();
-        showLog();
+        showTree();
     };
 
     syw.OnSaved = [this]() {
         watchFile();
-        showLog();
+        showTree();
     };
 
     syw.Quit = []() { QApplication::quit(); };
@@ -176,10 +183,70 @@ void MainWindow::watchFile()
     if (QFileInfo::exists(path)) watcher.addPath(path);
 }
 
-/// @details Replaces the contents of the log pane with SYW::LogText (UTF-8).
-void MainWindow::showLog()
+/**
+ * @details Remembers which items are expanded (by key), clears the tree and rebuilds it from SYW::Branches:
+ * one top-level item per branch (the current one in bold), one child per commit (hash and subject; date and
+ * author in the other columns) and one grandchild per file (`[M] resume.docx`). An empty branch list means
+ * the repository has no commits yet. A rename (`old<TAB>new`) is shown as `old -> new`.
+ */
+void MainWindow::showTree()
 {
-    text->setPlainText(QString::fromUtf8(syw.LogText.c_str()));
+    // A refresh (after every save) must not collapse what the user has opened.
+    QSet<QString> expanded;
+    bool refresh = false;
+    for (QTreeWidgetItemIterator it(tree); *it; ++it) {
+        const QString key = (*it)->data(0, Qt::UserRole).toString();
+        if (key.isEmpty()) continue;                // placeholder row
+        refresh = true;
+        if ((*it)->isExpanded()) expanded.insert(key);
+    }
+
+    tree->clear();
+
+    if (syw.Branches.empty()) {
+        new QTreeWidgetItem(tree, QStringList("(no commits yet)"));
+        return;
+    }
+
+    for (const GitBranch& b : syw.Branches) {
+        const QString bname = QString::fromUtf8(b.name.c_str());
+        const QString bkey = "b:" + bname;
+
+        QTreeWidgetItem* bi = new QTreeWidgetItem(tree);
+        bi->setText(0, bname + (b.current ? "  (current)" : ""));
+        bi->setData(0, Qt::UserRole, bkey);
+        bi->setData(0, Qt::UserRole + 1, KindBranch);
+        if (b.current) {
+            QFont f = bi->font(0);
+            f.setBold(true);
+            bi->setFont(0, f);
+        }
+
+        for (const GitCommit& c : b.commits) {
+            const QString hash = QString::fromUtf8(c.hash.c_str());
+            const QString ckey = bkey + "/c:" + hash;
+
+            QTreeWidgetItem* ci = new QTreeWidgetItem(bi);
+            ci->setText(0, hash + "  " + QString::fromUtf8(c.subject.c_str()));
+            ci->setText(1, QString::fromUtf8(c.date.c_str()));
+            ci->setText(2, QString::fromUtf8(c.author.c_str()));
+            ci->setData(0, Qt::UserRole, ckey);
+            ci->setData(0, Qt::UserRole + 1, KindCommit);
+
+            for (const GitFile& f : c.files) {
+                QString path = QString::fromUtf8(f.path.c_str());
+                path.replace('\t', " -> ");
+                QTreeWidgetItem* fi = new QTreeWidgetItem(ci);
+                fi->setText(0, "[" + QString::fromUtf8(f.status.c_str()) + "] " + path);
+                fi->setData(0, Qt::UserRole, ckey + "/f:" + QString::fromUtf8(f.path.c_str()));
+                fi->setData(0, Qt::UserRole + 1, KindFile);
+            }
+            ci->setExpanded(expanded.contains(ckey));
+        }
+        bi->setExpanded(refresh ? expanded.contains(bkey) : b.current);
+    }
+
+    for (int col = 0; col < tree->columnCount(); ++col) tree->resizeColumnToContents(col);
 }
 
 /**

@@ -1,6 +1,6 @@
 /**
  * @file MainWindow.h
- * @brief Qt front end for SYW: menu, git log pane, editor process and file watching.
+ * @brief Qt front end for SYW: menu, branch/commit/file tree, editor process and file watching.
  */
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
@@ -12,7 +12,7 @@
 
 #include "SYW.h"
 
-class QPlainTextEdit;
+class QTreeWidget;
 
 /**
  * @brief Main window of the SYW application.
@@ -30,13 +30,13 @@ class QPlainTextEdit;
  * | Shell             | QProcess (stdout+stderr merged, 5 s start / 30 s run limit) |
  * | LaunchEditor      | the @ref editorProc QProcess                                |
  * | GetCommitMessage  | QInputDialog::getMultiLineText()                            |
- * | OnOpened/OnSaved  | enable/refresh the log pane, (re-)arm @ref watcher          |
+ * | OnOpened/OnSaved  | enable/refresh the @ref tree, (re-)arm @ref watcher          |
  * | Quit              | QApplication::quit()                                        |
  *
  * @par Lifecycle
  *  - **File > Open** calls SYW::Open(), which launches the editor.
  *  - A save in the editor changes the file; @ref watcher notices, @ref debounce waits 500 ms, then
- *    SYW::Save() converts, commits and refreshes the log.
+ *    SYW::Save() converts, commits and refreshes the tree.
  *  - When the editor exits (or the window is closed) SYW::Exit() performs a final save and quits.
  */
 class MainWindow : public QMainWindow
@@ -66,11 +66,18 @@ private:
     void wireSyw();
     /// Watch SYW::CurrentFile for changes. Called after every save because editors replace the file.
     void watchFile();
-    /// Show SYW::LogText in the text pane.
-    void showLog();
+    /**
+     * @brief Rebuild the tree from SYW::Branches.
+     *
+     * Three levels: branch > commit > file. Every item carries a unique key in `Qt::UserRole`
+     * (`b:<branch>`, `.../c:<hash>`, `.../f:<path>`) and its kind (0 branch, 1 commit, 2 file) in
+     * `Qt::UserRole + 1`, so later actions can tell what was selected. Expanded items stay expanded across
+     * refreshes; on the first fill only the current branch is expanded.
+     */
+    void showTree();
 
     SYW& syw;                       ///< The session being driven.
-    QPlainTextEdit* text;           ///< Read-only git log pane; enabled only while an editor is running.
+    QTreeWidget* tree;              ///< Branch > commit > file tree; enabled only while an editor is running.
     QProcess editorProc;            ///< The external editor process.
     QFileSystemWatcher watcher;     ///< Detects saves of the open file.
     QTimer debounce;                ///< Single-shot 500 ms timer coalescing bursts of file changes.

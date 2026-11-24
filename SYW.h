@@ -36,6 +36,37 @@
 #include "XmlCls.h"
 
 /**
+ * @brief One file touched by a commit.
+ */
+struct GitFile
+{
+    std::string status;     ///< git name-status code: `A` added, `M` modified, `D` deleted, `R100` renamed, ...
+    std::string path;       ///< Path relative to the repository root (for a rename: `old<TAB>new`).
+};
+
+/**
+ * @brief One commit and the files it changed.
+ */
+struct GitCommit
+{
+    std::string hash;       ///< Abbreviated commit hash.
+    std::string date;       ///< Author date, `YYYY-MM-DD`.
+    std::string author;     ///< Author name.
+    std::string subject;    ///< First line of the commit message.
+    std::vector<GitFile> files;     ///< Files changed (nominally the DOCX and the MD file).
+};
+
+/**
+ * @brief One local branch and its most recent commits (newest first).
+ */
+struct GitBranch
+{
+    std::string name;       ///< Branch name, e.g. `master`.
+    bool current = false;   ///< `true` for the checked-out branch.
+    std::vector<GitCommit> commits;     ///< At most SYW::LogLimit commits, newest first.
+};
+
+/**
  * @brief One SYW editing session.
  *
  * @see MainWindow for the Qt front end that wires up the hooks.
@@ -81,8 +112,14 @@ public:
     long EditorPID = 0;
     /// Absolute path of the open file; empty (`""`) when no file is open.
     char CurrentFile[4096] = "";
-    /// Output of the last successful `git log`, ready for the GUI to display (see RefreshLog()).
-    std::string LogText;
+
+    /// @name Git state (filled by RefreshLog())
+    /// @{
+    std::string RepoRoot;               ///< Top-level directory of the git repository.
+    std::string CurrentBranch;          ///< Checked-out branch; empty for a detached HEAD.
+    std::vector<GitBranch> Branches;    ///< Local branches (current branch first) with commits and files.
+    int LogLimit = 50;                  ///< Maximum number of commits listed per branch.
+    /// @}
     /// @}
 
     /// Constructs an idle session (no file open, all hooks at their inert defaults).
@@ -207,7 +244,7 @@ public:
      *  3. `git diff --cached --quiet` to see whether either changed; if not, stop quietly,
      *  4. ask for a commit message (@ref GetCommitMessage); an empty answer skips the commit,
      *  5. `git commit -F <file> -- <docx> <md>` (only those two paths are committed),
-     *  6. refresh the git log.
+     *  6. refresh the branch / commit / file lists (see RefreshLog()).
      *
      * @ref OnSaved is always called, then the error (if any) is published. Nothing is pushed.
      */
@@ -221,13 +258,13 @@ public:
     void Exit();
 
     /**
-     * @brief Fill @ref LogText from `git log` of the current directory.
+     * @brief Fill @ref Branches, @ref CurrentBranch and @ref RepoRoot from git, using the current directory.
      *
-     * Runs `git rev-parse --show-toplevel` (is this a repository?) and then `git log` (last 200 commits).
-     * A repository with no commits yet is **not** an error: @ref LogText says so and `true` is returned.
+     * A repository with no commits yet is **not** an error: @ref Branches is simply empty and `true` is
+     * returned. The previous contents are replaced only if every git command succeeded.
      *
      * @returns `true` on success; `false` with @ref err set on failure (git missing, not a repository,
-     *          `git log` failed).
+     *          a git command failed). Unusable branch names are skipped with a WARN in @ref err.
      */
     bool RefreshLog();
 };
