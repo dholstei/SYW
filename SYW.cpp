@@ -1,161 +1,203 @@
+#include "SYW.h"
 #include "MainWindow.h"
 
-#include <QAction>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
 #include <QApplication>
-#include <QCloseEvent>
-#include <QDir>
-#include <QFileDialog>
-#include <QFileInfo>
-#include <QFontDatabase>
-#include <QMenuBar>
-#include <QPlainTextEdit>
-#include <QStatusBar>
+#include <QMessageBox>
 
-MainWindow::MainWindow(SYW& s, QWidget* parent)
-    : QMainWindow(parent), syw(s)
-{
-    setWindowTitle("SYW");
-    resize(900, 600);
+// CLI default: print the error. main() replaces this with a Qt popup.
+std::function<void(const Error&)> Error::Publisher = [](const Error& e) {
+    printf("%s: %s", LvlStr(e.level).c_str(), e.msg.c_str());
+    if (!e.data.empty()) printf(" (%s)", e.data.c_str());
+    printf("\n");
+};
 
-    text = new QPlainTextEdit(this);
-    text->setReadOnly(true);
-    text->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    text->setPlaceholderText("Open a file to launch the editor.");
-    text->setEnabled(false);              // active only while an editor is running
-    setCentralWidget(text);
+int main(int argc, char** argv) {
+    // Build Qt infrastructure and initialize the application
+    QApplication app(argc, argv);
 
-    buildMenu();
-    wireSyw();
+    // Qt app: errors become a popup
+    Error::Publisher = [](const Error& e) {
+        QMessageBox::Icon icon = QMessageBox::Information;
+        if (e.level == WARN) icon = QMessageBox::Warning;
+        if (e.level == ERR)  icon = QMessageBox::Critical;
 
-    // Editor closed -> final save and quit.
-    connect(&editorProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int code, QProcess::ExitStatus status) {
-                text->setEnabled(false);
-                if (status != QProcess::NormalExit || code != 0) {
-                    syw.SetErr(WARN, "The editor exited abnormally", "%s, exit code %d",
-                               status == QProcess::CrashExit ? "crashed" : "exited", code);
-                    MSG_ERR(syw.err);
-                }
-                syw.Exit();
-            });
-
-    // Saves from LibreOffice are write-to-temp + rename, so the watcher loses the
-    // path after each change; debounce, then Save() (whose OnSaved re-adds the path).
-    debounce.setSingleShot(true);
-    debounce.setInterval(500);
-    connect(&watcher, &QFileSystemWatcher::fileChanged, this, [this]() { debounce.start(); });
-    connect(&debounce, &QTimer::timeout, this, [this]() { syw.Save(); });
-}
-
-void MainWindow::buildMenu()
-{
-    QMenu* file = menuBar()->addMenu("&File");
-
-    QAction* open = file->addAction("&Open...");
-    open->setShortcut(QKeySequence::Open);
-    connect(open, &QAction::triggered, this, [this]() { syw.Open(); });
-
-    file->addSeparator();
-
-    QAction* quit = file->addAction("&Quit");
-    quit->setShortcut(QKeySequence::Quit);
-    connect(quit, &QAction::triggered, this, &QWidget::close);
-}
-
-void MainWindow::wireSyw()
-{
-    syw.GetFileName = [this]() {
-        return QFileDialog::getOpenFileName(this, "Open document", QString(),
-                                            "Word documents (*.docx);;All files (*)")
-            .toStdString();
+        QMessageBox box(icon, QString::fromStdString(LvlStr(e.level)),
+                        QString::fromStdString(e.msg), QMessageBox::Ok,
+                        QApplication::activeWindow());
+        if (!e.data.empty()) box.setInformativeText(QString::fromStdString(e.data));
+        box.exec();
     };
 
-    syw.AbsPath = [](const std::string& file) {
-        return QFileInfo(QString::fromUtf8(file.c_str())).absoluteFilePath().toStdString();
-    };
+    SYW syw;
+    MainWindow window(syw);   // wires the SYW hooks to the GUI
+    window.show();
 
-    syw.CdToFile = [](const std::string& file) {
-        return QDir::setCurrent(QFileInfo(QString::fromUtf8(file.c_str())).absolutePath());
-    };
-
-    syw.BasePath = [](const std::string& file) {
-        QFileInfo fi(QString::fromUtf8(file.c_str()));
-        return fi.absoluteDir().filePath(fi.completeBaseName()).toStdString();
-    };
-
-    syw.Shell = [](const std::string& command, std::string& output) -> int {
-        QStringList args = QProcess::splitCommand(QString::fromStdString(command));
-        if (args.isEmpty()) { output = "Empty command"; return -1; }
-
-        QString program = args.takeFirst();
-        QProcess p;
-        p.setProcessChannelMode(QProcess::MergedChannels);   // stdout + stderr
-        p.start(program, args);                              // runs in the current directory
-        if (!p.waitForStarted(5000)) {
-            output = (program + ": " + p.errorString()).toStdString();
-            return -1;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+            syw.Open(argv[i + 1]); ++i; // Skip the next argument since it's the file name
         }
-        if (!p.waitForFinished(30000)) {
-            p.kill();
-            output = (program + ": timed out").toStdString();
-            return -1;
-        }
-        output = QString::fromUtf8(p.readAll()).toStdString();
-        if (p.exitStatus() != QProcess::NormalExit) return -1;
-        return p.exitCode();
-    };
-
-    syw.LaunchEditor = [this](const std::string& command) -> long {
-        QStringList args = QProcess::splitCommand(QString::fromStdString(command));
-        if (args.isEmpty()) {
-            syw.SetErr(ERR, "Editor command is empty", nullptr);
-            return 0;
-        }
-        QString program = args.takeFirst();
-        editorProc.start(program, args);
-        if (!editorProc.waitForStarted(5000)) {
-            syw.SetErr(ERR, "Could not launch the editor", "%s: %s",
-                       program.toUtf8().constData(),
-                       editorProc.errorString().toUtf8().constData());
-            return 0;
-        }
-        return static_cast<long>(editorProc.processId());
-    };
-
-    syw.OnOpened = [this]() {
-        text->setEnabled(true);
-        statusBar()->showMessage("Editing " + QString::fromUtf8(syw.CurrentFile));
-        watchFile();
-        showLog();
-    };
-
-    syw.OnSaved = [this]() {
-        watchFile();
-        showLog();
-    };
-
-    syw.Quit = []() { QApplication::quit(); };
-}
-
-void MainWindow::watchFile()
-{
-    const QString path = QString::fromUtf8(syw.CurrentFile);
-    if (path.isEmpty() || watcher.files().contains(path)) return;
-    if (QFileInfo::exists(path)) watcher.addPath(path);
-}
-
-void MainWindow::showLog()
-{
-    text->setPlainText(QString::fromUtf8(syw.LogText.c_str()));
-}
-
-void MainWindow::closeEvent(QCloseEvent* event)
-{
-    if (editorProc.state() != QProcess::NotRunning) {
-        editorProc.disconnect(this);       // we handle the shutdown ourselves
-        editorProc.terminate();
-        if (!editorProc.waitForFinished(3000)) editorProc.kill();
     }
-    syw.Exit();                            // final Save() + Quit()
-    event->accept();
+
+    // Main loop of the application (ends when SYW::Quit is called)
+    return app.exec();
+}
+
+SYW::SYW(/* args */)
+{
+}
+
+SYW::~SYW()
+{
+}
+
+void SYW::SetErr(lvl level, const char* msg, const char* fmt, ...)
+{
+    char buf[2048];
+
+    buf[0] = '\0';
+    if (fmt) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof buf, fmt, ap);
+        va_end(ap);
+    }
+    err.level = level;
+    err.msg = msg;
+    err.data = buf;
+}
+
+void SYW::Open(const std::string& file)
+{
+    std::string abs;
+    FILE* fp;
+    char cmd[8192];
+    int n;
+
+    err = Error();
+
+    if (EditorPID != 0) {
+        SetErr(WARN, "An editor is already running", "%s", CurrentFile);
+        goto done;
+    }
+    if (file.empty()) {
+        SetErr(ERR, "No file name given", nullptr);
+        goto done;
+    }
+
+    abs = AbsPath(file);
+    if (abs.size() >= sizeof CurrentFile) {
+        SetErr(ERR, "File path too long", "%zu characters (max %zu): %s",
+               abs.size(), sizeof CurrentFile - 1, abs.c_str());
+        goto done;
+    }
+
+    fp = fopen(abs.c_str(), "rb");
+    if (!fp) {
+        SetErr(ERR, "Cannot open file", "%s: %s", abs.c_str(), strerror(errno));
+        goto done;
+    }
+    fclose(fp);
+
+    if (!CdToFile(abs)) {
+        SetErr(ERR, "Cannot change to the file's directory", "%s", abs.c_str());
+        goto done;
+    }
+
+    snprintf(CurrentFile, sizeof CurrentFile, "%s", abs.c_str());
+
+    // The root DOCX/MD files are presumed to live in a root git repo; check before editing.
+    if (!RefreshLog()) {
+        CurrentFile[0] = '\0';
+        goto done;
+    }
+
+    n = snprintf(cmd, sizeof cmd, editor.c_str(), CurrentFile);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "Editor command too long", "%s", CurrentFile);
+        CurrentFile[0] = '\0';
+        goto done;
+    }
+
+    EditorPID = LaunchEditor(cmd);
+    if (EditorPID == 0) {
+        if (!err) SetErr(ERR, "Could not launch the editor", "%s", cmd);
+        CurrentFile[0] = '\0';
+        goto done;
+    }
+
+    OnOpened();
+
+done:
+    MSG_ERR(err);
+}
+
+void SYW::Save()
+{
+    std::string base, out;
+    char cmd[8192];
+    int n, rc;
+
+    if (CurrentFile[0] == '\0') return;
+    err = Error();
+
+    base = BasePath(CurrentFile);
+    n = snprintf(cmd, sizeof cmd, to_Markdown.c_str(), base.c_str(), base.c_str());
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "Markdown conversion command too long", "%s", base.c_str());
+        goto done;
+    }
+
+    rc = Shell(cmd, out);
+    if (rc != 0) {
+        SetErr(ERR, "Markdown conversion failed", "exit code %d\n%s\n%s", rc, cmd, out.c_str());
+        goto done;
+    }
+
+    RefreshLog();   // sets err itself on failure
+
+done:
+    OnSaved();      // GUI update / re-arm the file watcher, even after an error
+    MSG_ERR(err);
+}
+
+void SYW::Exit()
+{
+    Save();
+    EditorPID = 0;
+    Quit();
+}
+
+bool SYW::RefreshLog()
+{
+    std::string top, log;
+    int rc;
+
+    rc = Shell("git rev-parse --show-toplevel", top);
+    if (rc < 0) {
+        SetErr(ERR, "Could not run git", "%s", top.c_str());
+        return false;
+    }
+    if (rc != 0) {
+        SetErr(ERR, "Not in a git repository", "%s\n%s", CurrentFile, top.c_str());
+        return false;
+    }
+    while (!top.empty() && (top.back() == '\n' || top.back() == '\r')) top.pop_back();
+
+    rc = Shell("git log --graph --decorate --date=short -n 200 --pretty=format:\"%h %ad %an  %s%d\"", log);
+    if (rc < 0) {
+        SetErr(ERR, "Could not run git log", "%s", log.c_str());
+        return false;
+    }
+    if (rc != 0) {    // e.g. a repository with no commits yet
+        SetErr(WARN, "git log failed", "%s\n%s", top.c_str(), log.c_str());
+        return false;
+    }
+
+    LogText = "Repository: " + top + "\n\n" + log;
+    return true;
 }
