@@ -3,10 +3,12 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QInputDialog>
 #include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QStatusBar>
@@ -81,6 +83,15 @@ void MainWindow::wireSyw()
     syw.BasePath = [](const std::string& file) {
         QFileInfo fi(QString::fromUtf8(file.c_str()));
         return fi.absoluteDir().filePath(fi.completeBaseName()).toStdString();
+    };
+
+    syw.GetCommitMessage = [this]() {
+        bool ok = false;
+        QString msg = QInputDialog::getMultiLineText(
+            this, "Commit revision", "What changed, and why?",
+            QDateTime::currentDateTime().toString("'Revision' yyyy-MM-dd hh:mm"), &ok);
+        if (!ok) return std::string();          // cancelled: skip the commit
+        return msg.trimmed().toStdString();
     };
 
     syw.Shell = [](const std::string& command, std::string& output) -> int {

@@ -67,6 +67,9 @@ public:
     /// `file` without its extension, directory kept (/a/b/report.docx -> /a/b/report).
     std::function<std::string(const std::string&)> BasePath = [](const std::string& file) { return file; };
 
+    /// Asks for the commit message of a revision. Return an empty string to skip the commit.
+    std::function<std::string()> GetCommitMessage = []() { return std::string("SYW revision"); };
+
     /// Called after an editor has been launched for a file.
     std::function<void()> OnOpened = []() {};
     /// Called after Save() has run (success or not).
@@ -87,7 +90,9 @@ public:
     /**
      * @brief The file has been modified, do the `thing`.
      *
-     * Converts the document to Markdown via `to_Markdown` and refreshes the git log.
+     * Converts the document to Markdown via `to_Markdown`, stages the DOCX and MD files, commits
+     * them (if they changed and GetCommitMessage() returns a message) and refreshes the git log.
+     * Nothing is pushed.
      */
     void Save();
 

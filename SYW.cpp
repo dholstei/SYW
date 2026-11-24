@@ -138,13 +138,15 @@ done:
 
 void SYW::Save()
 {
-    std::string base, out;
-    char cmd[8192];
-    int n, rc;
+    std::string base, out, msg;
+    char cmd[8192], md[4096], msgfile[] = "syw-commit-msg.tmp";
+    int n, rc, werr;
+    FILE* fp;
 
     if (CurrentFile[0] == '\0') return;
     err = Error();
 
+    // --- DOCX -> Markdown ---
     base = BasePath(CurrentFile);
     n = snprintf(cmd, sizeof cmd, to_Markdown.c_str(), base.c_str(), base.c_str());
     if (n < 0 || (size_t)n >= sizeof cmd) {
@@ -158,6 +160,69 @@ void SYW::Save()
         goto done;
     }
 
+    n = snprintf(md, sizeof md, "%s.md", base.c_str());
+    if (n < 0 || (size_t)n >= sizeof md) {
+        SetErr(ERR, "Markdown file name too long", "%s", base.c_str());
+        goto done;
+    }
+
+    // --- stage both files ---
+    n = snprintf(cmd, sizeof cmd, "git add -- \"%s\" \"%s\"", CurrentFile, md);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "git add command too long", "%s", CurrentFile);
+        goto done;
+    }
+    rc = Shell(cmd, out);
+    if (rc != 0) {
+        SetErr(ERR, "git add failed", "exit code %d\n%s\n%s", rc, cmd, out.c_str());
+        goto done;
+    }
+
+    // --- anything new to commit?  (git diff --cached --quiet: 0 = no, 1 = yes, else error) ---
+    n = snprintf(cmd, sizeof cmd, "git diff --cached --quiet -- \"%s\" \"%s\"", CurrentFile, md);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "git diff command too long", "%s", CurrentFile);
+        goto done;
+    }
+    rc = Shell(cmd, out);
+    if (rc == 0) goto refresh;                  // unchanged, nothing to commit
+    if (rc != 1) {
+        SetErr(ERR, "git diff failed", "exit code %d\n%s\n%s", rc, cmd, out.c_str());
+        goto done;
+    }
+
+    // --- commit message (empty = the author declined; the files stay staged for next time) ---
+    msg = GetCommitMessage();
+    if (msg.empty()) goto refresh;
+
+    // The message goes through a file (git commit -F) so quotes etc. need no shell escaping.
+    n = snprintf(cmd, sizeof cmd, "git commit -F \"%s\" -- \"%s\" \"%s\"", msgfile, CurrentFile, md);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        SetErr(ERR, "git commit command too long", "%s", CurrentFile);
+        goto done;
+    }
+    fp = fopen(msgfile, "wb");
+    if (!fp) {
+        SetErr(ERR, "Cannot create the commit message file", "%s: %s", msgfile, strerror(errno));
+        goto done;
+    }
+    werr = 0;
+    if (fwrite(msg.c_str(), 1, msg.size(), fp) != msg.size()) werr = errno ? errno : EIO;
+    if (fclose(fp) != 0 && !werr) werr = errno ? errno : EIO;
+    if (werr) {
+        remove(msgfile);
+        SetErr(ERR, "Cannot write the commit message file", "%s: %s", msgfile, strerror(werr));
+        goto done;
+    }
+
+    rc = Shell(cmd, out);
+    remove(msgfile);
+    if (rc != 0) {      // e.g. user.name / user.email not configured
+        SetErr(ERR, "git commit failed", "exit code %d\n%s\n%s", rc, cmd, out.c_str());
+        goto done;
+    }
+
+refresh:
     RefreshLog();   // sets err itself on failure
 
 done:
@@ -193,7 +258,14 @@ bool SYW::RefreshLog()
         SetErr(ERR, "Could not run git log", "%s", log.c_str());
         return false;
     }
-    if (rc != 0) {    // e.g. a repository with no commits yet
+    if (rc != 0) {
+        // A repository with no commits yet is not an error: the first Save() makes the initial commit.
+        // (git rev-parse --verify --quiet HEAD: exit code 1 = HEAD does not exist)
+        std::string head;
+        if (Shell("git rev-parse --verify --quiet HEAD", head) == 1) {
+            LogText = "Repository: " + top + "\n\n(no commits yet)";
+            return true;
+        }
         SetErr(WARN, "git log failed", "%s\n%s", top.c_str(), log.c_str());
         return false;
     }
