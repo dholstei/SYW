@@ -19,7 +19,7 @@ MOC       := $(QT_PREFIX)/libexec/moc
 
 INCLUDES:=-I/usr/include/libxml2 -I~/Repos/XmlCls
 INCLUDES:=$(INCLUDES) -I/usr/include
-INCLUDES:=$(INCLUDES) -I./ -I../XmlCls -I../cpp-base64
+INCLUDES:=$(INCLUDES) -I./ -I../XmlCls -I../cpp-base64 -Iextern/diff-match-patch/cpp
 INCLUDES:=$(INCLUDES) -I$(QT_INC) -I$(QT_INC)/QtCore -I$(QT_INC)/QtGui -I$(QT_INC)/QtWidgets
 LDFLAGS=$(DEBUG)
 LDLIBS:=-lpthread -lxml2 -L$(QT_LIB) -lQt6Widgets -lQt6Gui -lQt6Core -Wl,-rpath,$(QT_LIB)
@@ -39,6 +39,8 @@ endif
 all: SYW
 
 OBJECTS=
+
+vpath %.cpp extern/diff-match-patch/cpp
 
 # Compile C++ source files into object files
 %.o:	%.cpp
@@ -61,7 +63,7 @@ SYW.o MainWindow.o: SYW.h MainWindow.h
 		then echo "--- Archive \"$@\": Success ---" | $(LOGGER) ;\
 		else echo "--- Archive \"$@\": FAILURE! ---" | $(LOGGER) ; exit 1; fi
 
-SYW:	SYW.o MainWindow.o moc_MainWindow.o $(LIBXML)
+SYW:	SYW.o MainWindow.o moc_MainWindow.o diff_match_patch.o $(LIBXML)
 	@mkdir -p $(BINDIR)
 	@if $(CXX) -o $@ $^ $(LDLIBS) $(LIBXML);\
 		then echo "--- Link \"$@\": Success ---" | $(LOGGER) ;\

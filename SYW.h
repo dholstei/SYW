@@ -119,6 +119,15 @@ public:
     std::string CurrentBranch;          ///< Checked-out branch; empty for a detached HEAD.
     std::vector<GitBranch> Branches;    ///< Local branches (current branch first) with commits and files.
     int LogLimit = 50;                  ///< Maximum number of commits listed per branch.
+
+    /// Granularity of a text diff (see DiffHtml and DiffFiles).
+    enum diffLevel {
+        Word,       ///< Words, runs of white space and single punctuation marks.
+        Line,       ///< Lines (text up to and including a newline).
+        Paragraph   ///< Blocks separated by a blank line; usually coincides with Line when pandoc runs with `--wrap=none`.
+    };
+    /// Granularity used by DiffFiles(). Settable; to be loaded from the configuration file later.
+    diffLevel DiffLevel = Word;
     /// @}
     /// @}
 
@@ -190,6 +199,24 @@ public:
      * @returns The message, or an empty string to skip the commit (the files stay staged).
      */
     std::function<std::string()> GetCommitMessage = []() { return std::string("SYW revision"); };
+
+    /**
+     * @brief Computes a diff of two texts and renders it as HTML.
+     *
+     * Must be overridden by the GUI layer (MainWindow uses diff_match_patch). The default reports failure
+     * rather than pretending to succeed.
+     *
+     * @param oldText Text of the older snapshot (UTF-8).
+     * @param newText Text of the newer snapshot (UTF-8).
+     * @param level   Granularity of the comparison.
+     * @param html    Receives the rendered diff on success, or a description of the problem on failure.
+     * @returns `true` on success, `false` on failure.
+     */
+    std::function<bool(const std::string& oldText, const std::string& newText, diffLevel level, std::string& html)>
+        DiffHtml = [](const std::string&, const std::string&, diffLevel, std::string& html) {
+            html = "DiffHtml hook not set";
+            return false;
+        };
 
     /// Called after an editor has been launched for a file.
     std::function<void()> OnOpened = []() {};
@@ -281,6 +308,35 @@ public:
      *          the file does not exist in that commit).
      */
     bool FileAtCommit(const std::string& hash, const std::string& path, std::string& content);
+
+    /**
+     * @brief Tell which of two commits is older.
+     *
+     * Clears @ref err on entry and publishes it on exit, like the other operations.
+     *
+     * @param a        First commit (hexadecimal hash, abbreviated is fine).
+     * @param b        Second commit.
+     * @param bIsOlder Set to `true` if `b` is older than `a` (the caller should swap them to get old, new);
+     *                 `false` otherwise, including when they cannot be told apart.
+     * @returns `true` on success; `false` with @ref err set on failure (bad hash, git failed).
+     */
+    bool OrderCommits(const std::string& a, const std::string& b, bool& bIsOlder);
+
+    /**
+     * @brief Diff one file between two commits, rendered as HTML by the @ref DiffHtml hook.
+     *
+     * Fetches both snapshots with FileAtCommit() and hands them to DiffHtml with @ref DiffLevel. Use
+     * OrderCommits() first if you do not know which commit is older.
+     *
+     * @param oldHash Commit of the older snapshot.
+     * @param oldPath Path of the file in that commit.
+     * @param newHash Commit of the newer snapshot.
+     * @param newPath Path of the file in that commit (differs from `oldPath` after a rename).
+     * @param html    Receives the rendered diff (empty on failure).
+     * @returns `true` on success; `false` with @ref err set on failure.
+     */
+    bool DiffFiles(const std::string& oldHash, const std::string& oldPath,
+                   const std::string& newHash, const std::string& newPath, std::string& html);
 };
 
 #endif // SYW_H

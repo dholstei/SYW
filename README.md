@@ -15,7 +15,7 @@ part of the work. The idea and goals are in [SYW.md](SYW.md). This README covers
 | File | Role |
 |------|------|
 | `SYW.h` / `SYW.cpp` | **Core** (`class SYW`) and `main()`. No GUI types in the class; everything external goes through hooks. |
-| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File and View menus, branch/commit/file tree, Markdown popup viewer, editor process, file watching. Wires the hooks. |
+| `MainWindow.h` / `MainWindow.cpp` | **Qt front end**: File and View menus, branch/commit/file tree, Markdown popup viewer, snapshot diff, editor process, file watching. Wires the hooks. |
 | `Error.h` | `Error` object, `MSG_ERR()` and the `Error::Publisher` output hook. |
 | `Makefile` | GNU make build (explicit Qt flags, `moc` rule). |
 | `SYW.md` | Design document: the "why". |
@@ -85,6 +85,25 @@ renders the result in a separate, non-modal window, so several snapshots can be 
 is enabled by `MainWindow::updateViewActions()` only for a single Markdown file that exists in its commit.
 The viewer uses `QTextBrowser::setMarkdown()`, which renders CommonMark/GitHub-style Markdown.
 
+### Diffing two snapshots
+
+Select exactly two `.md` file nodes (Ctrl-click, usually the same file in two commits) and choose
+**View > Diff**. The flow:
+
+```
+MainWindow::viewDiff()
+  SYW::OrderCommits(a, b, bIsOlder)   git log -1 --format=%ct, parsed with sscanf; same second -> git merge-base --is-ancestor
+  SYW::DiffFiles(old, new, html)      two FileAtCommit() calls, then the DiffHtml hook at SYW::DiffLevel
+    DiffToHtml()                      (MainWindow.cpp) diff_match_patch on tokens, rendered as HTML
+```
+
+`SYW::DiffLevel` (`enum SYW::diffLevel { Word, Line, Paragraph }`, default `Word`) sets the token size. Each
+distinct token is encoded as one `QChar`, `diff_main()` compares those, `diff_cleanupSemantic()` tidies the
+result and the tokens are decoded again. (`diff_charsToLines()` is private in diff-match-patch, so the encoding is
+done in `Tokenize()`/`DiffToHtml()`.) Additions are green and underlined, deletions red and struck through;
+Qt rich text has no `<ins>/<del>`, so spans are used. The popup lists both commits above the diff. The core
+never sees diff-match-patch: it only knows the `DiffHtml` hook, so a different diff engine is a one-line swap.
+
 ### Hooks (the GUI boundary)
 
 `SYW` never calls Qt. It calls these `std::function` members, which `MainWindow::wireSyw()` assigns. The
@@ -140,8 +159,15 @@ Code that calls `Open()` or `Save()` can inspect `if (syw.err)` afterwards. In t
 
 ## Roadmap
 
-- Actions on tree selections (view a file at a commit, diff, checkout).
-- **View > Diff** for two selected Markdown snapshots.
+- Actions on tree selections (checkout).
 - Git actions navigation: branches, diffs, timeline.
 - `git push` once a remote is configured (`git remote add origin <url>`).
 - Repository creation from the application.
+- **File > New**: create a new, empty DOCX in the same directory as the current document, then spawn a
+  separate SYW process (`SYW --file <new.docx>`) with its own editor. One process per document matches the
+  one-editor-per-session design of `SYW`, so the core does not change.
+- Configuration through [XmlCls](https://github.com/dholstei/XmlCls): defaults in `~/.syw.xml`, per-document
+  overrides in `.git/.syw.xml` (local to the clone, never committed). Planned settings include `git_server`,
+  `git_user`, the `editor` and `to_Markdown` templates and `diffLevel`.
+- Load `SYW::DiffLevel` (`enum SYW::diffLevel { Word, Line, Paragraph }`) from the configuration (`Paragraph` = blank-line separated blocks,
+  which equals `Line` when pandoc is run with `--wrap=none`).

@@ -31,6 +31,7 @@ class QTreeWidget;
  * | Shell             | QProcess (stdout+stderr merged, 5 s start / 30 s run limit) |
  * | LaunchEditor      | the @ref editorProc QProcess                                |
  * | GetCommitMessage  | QInputDialog::getMultiLineText()                            |
+ * | DiffHtml          | diff_match_patch on word/line/paragraph tokens, see DiffToHtml() |
  * | OnOpened/OnSaved  | enable/refresh the @ref tree, (re-)arm @ref watcher          |
  * | Quit              | QApplication::quit()                                        |
  *
@@ -38,6 +39,11 @@ class QTreeWidget;
  * **View > Document** is enabled only while exactly one item is selected in the @ref tree and that item is
  * a Markdown file that exists in its commit. It opens a separate, non-modal window showing the rendered
  * Markdown of that snapshot (SYW::FileAtCommit()); any number of these windows can be open at once.
+ *
+ * **View > Diff** is enabled only while exactly two Markdown file items are selected (two snapshots, usually of
+ * the same file in different commits). The older one is found with SYW::OrderCommits(), the comparison is made
+ * by SYW::DiffFiles() through the @ref SYW::DiffHtml hook (implemented here with diff_match_patch) at the
+ * granularity SYW::DiffLevel, and shown in a popup window, again any number at once.
  *
  * @par Lifecycle
  *  - **File > Open** calls SYW::Open(), which launches the editor.
@@ -66,7 +72,7 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    /// Create the **File** menu (Open, Quit) and the **View** menu (Document).
+    /// Create the **File** menu (Open, Quit) and the **View** menu (Document, Diff).
     void buildMenu();
     /// Assign every SYW hook (see the table in the class description).
     void wireSyw();
@@ -93,9 +99,18 @@ private:
      * Does nothing unless exactly one Markdown file is selected. Errors are published through `syw.err`.
      */
     void viewDocument();
+    /**
+     * @brief Open a popup window comparing the two selected Markdown snapshots.
+     *
+     * Does nothing unless exactly two Markdown files are selected. Orders them old/new, calls
+     * SYW::DiffFiles() and shows the HTML in a read-only QTextBrowser headed by both commits. Additions are
+     * green, deletions red and struck through. Errors are published through `syw.err`.
+     */
+    void viewDiff();
 
     SYW& syw;                       ///< The session being driven.
     QAction* viewDocumentAct;       ///< **View > Document**; enabled by updateViewActions().
+    QAction* viewDiffAct;           ///< **View > Diff**; enabled by updateViewActions().
     QTreeWidget* tree;              ///< Branch > commit > file tree; enabled only while an editor is running.
     QProcess editorProc;            ///< The external editor process.
     QFileSystemWatcher watcher;     ///< Detects saves of the open file.

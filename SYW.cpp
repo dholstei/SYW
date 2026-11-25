@@ -462,3 +462,102 @@ done:
     MSG_ERR(err);
     return ok;
 }
+
+/// True if `s` is 1-64 hexadecimal digits (a git object name, or an abbreviation of one).
+static bool IsHexHash(const std::string& s)
+{
+    size_t i;
+
+    if (s.empty() || s.size() > 64) return false;
+    for (i = 0; i < s.size(); ++i)
+        if (!isxdigit((unsigned char)s[i])) return false;
+    return true;
+}
+
+/**
+ * @details Reads the committer timestamp of each commit with `git log -1 --format=%ct <hash>` (parsed with
+ * sscanf) and compares them. Commits made in the same second are ordered by ancestry instead:
+ * `git merge-base --is-ancestor <b> <a>` exits 0 if `b` is an ancestor of `a` (so `b` is older) and 1 if not;
+ * any other exit code is an error. Commits on unrelated branches are ordered by time alone.
+ */
+bool SYW::OrderCommits(const std::string& a, const std::string& b, bool& bIsOlder)
+{
+    const std::string* hash[2] = { &a, &b };
+    long long when[2] = { 0, 0 };
+    std::string out;
+    char cmd[512];
+    int i, n, rc;
+    bool ok = false;
+
+    err = Error();
+    bIsOlder = false;
+
+    for (i = 0; i < 2; ++i) {
+        if (!IsHexHash(*hash[i])) {
+            SetErr(ERR, "Invalid commit hash", "\"%s\"", hash[i]->c_str());
+            goto done;
+        }
+        n = snprintf(cmd, sizeof cmd, "git log -1 --format=%%ct %s", hash[i]->c_str());
+        if (n < 0 || (size_t)n >= sizeof cmd) {
+            SetErr(ERR, "git log command too long", "%s", hash[i]->c_str());
+            goto done;
+        }
+        rc = Shell(cmd, out);
+        if (rc != 0) {
+            SetErr(ERR, rc < 0 ? "Could not run git log" : "git log failed", "exit code %d\n%s\n%s",
+                   rc, cmd, out.c_str());
+            goto done;
+        }
+        if (sscanf(out.c_str(), "%lld", &when[i]) != 1) {
+            SetErr(ERR, "Unexpected git log output", "%s\n%s", cmd, out.c_str());
+            goto done;
+        }
+    }
+
+    if (when[0] == when[1] && a != b) {
+        n = snprintf(cmd, sizeof cmd, "git merge-base --is-ancestor %s %s", b.c_str(), a.c_str());
+        if (n < 0 || (size_t)n >= sizeof cmd) {
+            SetErr(ERR, "git merge-base command too long", "%s %s", a.c_str(), b.c_str());
+            goto done;
+        }
+        rc = Shell(cmd, out);
+        if (rc != 0 && rc != 1) {
+            SetErr(ERR, rc < 0 ? "Could not run git merge-base" : "git merge-base failed",
+                   "exit code %d\n%s\n%s", rc, cmd, out.c_str());
+            goto done;
+        }
+        bIsOlder = (rc == 0);
+    } else {
+        bIsOlder = when[1] < when[0];
+    }
+    ok = true;
+
+done:
+    MSG_ERR(err);
+    return ok;
+}
+
+/**
+ * @details FileAtCommit() validates its arguments and publishes its own errors, so a failure there returns
+ * immediately without a second message. A failure of the DiffHtml hook is recorded here, with the hook's
+ * explanation (it puts it in `html`) as `err.data`.
+ */
+bool SYW::DiffFiles(const std::string& oldHash, const std::string& oldPath,
+                    const std::string& newHash, const std::string& newPath, std::string& html)
+{
+    std::string oldText, newText;
+
+    err = Error();
+    html.clear();
+
+    if (!FileAtCommit(oldHash, oldPath, oldText)) return false;     // error already published
+    if (!FileAtCommit(newHash, newPath, newText)) return false;
+
+    if (!DiffHtml(oldText, newText, DiffLevel, html)) {
+        SetErr(ERR, "Could not compute the diff", "%s", html.c_str());
+        html.clear();
+        MSG_ERR(err);
+        return false;
+    }
+    return true;
+}
