@@ -33,7 +33,6 @@
 #include <vector>
 
 #include "Error.h"
-#include "XmlCls.h"
 
 /**
  * @brief One file touched by a commit.
@@ -107,6 +106,23 @@ public:
      * (see @ref BasePath). The commit step assumes the output is `<base>.md`.
      */
     std::string to_Markdown = "pandoc \"%s.docx\" -t markdown -o \"%s.md\"";
+
+    /**
+     * @brief Name of this document's repository on the git server (without `.git`).
+     *
+     * The server (@ref git_server, @ref git_user) is shared by all documents; the repository is not. Per
+     * document: stored only in `<git dir>/.syw.xml`. Used by Push() to build the URL of a new `origin`.
+     * Empty means "use the name of the repository's directory".
+     */
+    std::string git_repo;
+
+    /**
+     * @brief Push after every commit (config element `<auto_push value="1"/>`; `0` = off, e.g. when working offline).
+     *
+     * Applies only when a repository is associated with the document, that is, @ref git_repo is set or the
+     * repository already has a remote (see Save()). Can be set in either configuration file.
+     */
+    bool auto_push = true;
 
     /// PID of the running editor process, or 0 when no editor is running.
     long EditorPID = 0;
@@ -218,6 +234,16 @@ public:
             return false;
         };
 
+    /// Home directory of the user (where `.syw.xml` lives). Default: `$HOME`, else `%USERPROFILE%`; MainWindow uses QDir::homePath().
+    std::function<std::string()> HomeDir = []() {
+        const char* h = getenv("HOME");
+        if (!h || !*h) h = getenv("USERPROFILE");
+        return std::string(h ? h : "");
+    };
+
+    /// Short, non-error progress text for the user ("Pushed 1 commit to origin/main"). Default: ignore.
+    std::function<void(const std::string&)> OnStatus = [](const std::string&) {};
+
     /// Called after an editor has been launched for a file.
     std::function<void()> OnOpened = []() {};
     /// Called after Save() has run (success or not), so the GUI can refresh and re-arm file watching.
@@ -294,6 +320,102 @@ public:
      *          a git command failed). Unusable branch names are skipped with a WARN in @ref err.
      */
     bool RefreshLog();
+
+    /// Which configuration file SaveConfig() writes.
+    enum configScope {
+        ConfigDefault,      ///< `~/.syw.xml`: defaults for every document.
+        ConfigDocument      ///< `<git dir>/.syw.xml`: this document's repository only (never committed).
+    };
+
+    /// Path of the default configuration file (`~/.syw.xml`); set by LoadConfig().
+    std::string DefaultConfigPath;
+    /// Path of the per-document file (`<git dir>/.syw.xml`); empty until Open() has found the repository.
+    std::string DocConfigPath;
+
+    /**
+     * @brief Load the default configuration, `~/.syw.xml` (see @ref HomeDir).
+     *
+     * Call once at startup, before Open(). The file's root element is `<SYW>`; recognised children are
+     * `git_server`, `git_user`, `git_repo`, `editor`, `to_Markdown`, `diffLevel` (`Word`, `Line` or `Paragraph`) and
+     * `auto_push` (`<auto_push value="1"/>`; also `true/false`, `yes/no`, `on/off`), with `git_repo`
+     * (meant for the per-document file; see @ref git_repo).
+     * Missing elements keep their current value; unknown elements are ignored. If the file does not exist
+     * it is created from the current (compiled-in) values.
+     *
+     * @returns `true` on success; `false` with @ref err set if the home directory is unknown, the file
+     *          cannot be parsed, is not a `<SYW>` document, has an invalid `diffLevel`, or cannot be created.
+     *          The members keep whatever values were valid up to the failure.
+     */
+    bool LoadConfig();
+
+    /**
+     * @brief Load the per-document configuration, `<git dir>/.syw.xml`, over the defaults.
+     *
+     * Called by Open() after the repository has been found (and before the editor is launched, since it
+     * may change @ref editor). Sets @ref DocConfigPath. A missing file is not an error. A broken file
+     * is reported, and Open() carries on with the values it had.
+     *
+     * @returns `true` on success; `false` with @ref err set on failure.
+     */
+    bool LoadDocConfig();
+
+    /**
+     * @brief Write the current configuration values to a configuration file.
+     *
+     * All settings are written (for ConfigDefault `git_repo` is only declared empty). An existing file is updated in place (other elements are kept);
+     * otherwise a new one is created.
+     *
+     * @param scope ConfigDefault (`~/.syw.xml`) or ConfigDocument (`<git dir>/.syw.xml`, needs an open document).
+     * @returns `true` on success; `false` with @ref err set on failure.
+     */
+    bool SaveConfig(configScope scope);
+
+    /**
+     * @brief Read one configuration file into the members. No publishing: sets @ref err and returns.
+     * @param path File to read; it must exist.
+     */
+    bool ReadConfigFile(const char* path);
+
+    /**
+     * @brief Write the members to one configuration file. No publishing: sets @ref err and returns.
+     * @param path     File to create or update.
+     * @param document `true` for a per-document file: `git_repo` is written as well. The default file only
+     *                 gets an empty `<git_repo/>` (added if missing, an existing one is left alone), because the
+     *                 repository belongs to one document.
+     */
+    bool WriteConfigFile(const char* path, bool document);
+
+    /**
+     * @brief Ask `git status -sb` what the current branch tracks.
+     *
+     * @param upstream Receives the upstream branch (`origin/main`), or an empty string if the branch has none.
+     * @param ahead    Commits not yet pushed (0 if there is no upstream).
+     * @param behind   Commits on the server not yet here, as of the last fetch (0 if no upstream).
+     * @returns `true` on success; `false` with @ref err set if git failed, there are no commits yet, or
+     *          HEAD is detached (nothing can be pushed).
+     */
+    bool UpstreamStatus(std::string& upstream, int& ahead, int& behind);
+
+    /**
+     * @brief Push the current branch to its upstream git server. Does not ask for confirmation.
+     *
+     * 1. UpstreamStatus() decides what to do. With an upstream and nothing ahead, nothing is pushed and
+     *    `summary` says so (not an error).
+     * 2. With an upstream: `git push`.
+     * 3. Without one: the remote is `origin` if present, else the first remote. If there is no remote
+     *    at all, `origin` is added as `<git_server>/<git_user>/<git_repo>.git` (@ref git_repo, or the repository directory name if that is empty).
+     *    Then `git push -u <remote> <branch>` pushes and records the upstream.
+     *
+     * git is run with no terminal, so credentials must come from a credential helper or SSH keys; if they
+     * do not, git's own message ends up in @ref err.
+     *
+     * @param summary Receives a one-line result for the status bar.
+     * @returns `true` on success (including "nothing to push"); `false` with @ref err set on failure.
+     */
+    bool Push(std::string& summary);
+
+    /// `true` if the repository has at least one remote (`git remote` lists something). Errors count as "no".
+    bool HasRemote();
 
     /**
      * @brief Get the contents of a file as it was in a commit (`git show <hash>:<path>`).

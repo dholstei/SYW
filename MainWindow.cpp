@@ -9,11 +9,18 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QInputDialog>
+#include <QLineEdit>
+#include <QLabel>
 #include <QMenuBar>
 #include <QHash>
 #include <QSet>
@@ -203,6 +210,7 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
     connect(&editorProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int code, QProcess::ExitStatus status) {
                 tree->setEnabled(false);
+                pushAct->setEnabled(false);
                 if (status != QProcess::NormalExit || code != 0) {
                     syw.SetErr(WARN, "The editor exited abnormally", "%s, exit code %d",
                                status == QProcess::CrashExit ? "crashed" : "exited", code);
@@ -220,7 +228,8 @@ MainWindow::MainWindow(SYW& s, QWidget* parent)
 }
 
 /**
- * @details **File > Open...** (standard Open shortcut) calls SYW::Open(); **File > Quit** closes the window.
+ * @details **File > Open...** (standard Open shortcut) calls SYW::Open(); **File > Configure...** calls configure();
+ * **File > Push** (disabled until a document is open) calls push(); **File > Quit** closes the window.
  * **View > Document** (disabled until a single Markdown file is selected, see updateViewActions()) calls
  * viewDocument(); **View > Diff** (disabled until two are selected) calls viewDiff(). Double-clicking a Markdown file in the tree does the same.
  * Disabled menu entries are explicitly painted grey (palette, Disabled group) so they read as unavailable
@@ -233,6 +242,13 @@ void MainWindow::buildMenu()
     QAction* open = file->addAction("&Open...");
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, [this]() { syw.Open(); });
+
+    QAction* configureAct = file->addAction("&Configure...");
+    connect(configureAct, &QAction::triggered, this, [this]() { configure(); });
+
+    pushAct = file->addAction("&Push");
+    pushAct->setEnabled(false);          // enabled once a document is open
+    connect(pushAct, &QAction::triggered, this, [this]() { push(); });
 
     file->addSeparator();
 
@@ -315,7 +331,7 @@ void MainWindow::wireSyw()
             output = (program + ": " + p.errorString()).toStdString();
             return -1;
         }
-        if (!p.waitForFinished(30000)) {
+        if (!p.waitForFinished(120000)) {      // a push of a large DOCX can take a while
             p.kill();
             output = (program + ": timed out").toStdString();
             return -1;
@@ -344,8 +360,15 @@ void MainWindow::wireSyw()
 
     syw.DiffHtml = DiffToHtml;
 
+    syw.HomeDir = []() { return QDir::homePath().toStdString(); };
+
+    syw.OnStatus = [this](const std::string& text) {
+        statusBar()->showMessage(QString::fromUtf8(text.c_str()), 10000);
+    };
+
     syw.OnOpened = [this]() {
         tree->setEnabled(true);
+        pushAct->setEnabled(true);
         statusBar()->showMessage("Editing " + QString::fromUtf8(syw.CurrentFile));
         watchFile();
         showTree();
@@ -534,6 +557,95 @@ void MainWindow::viewDiff()
     viewer->setHtml(header + QString::fromUtf8(html.c_str()));
     viewer->resize(800, 800);
     viewer->show();
+}
+
+/**
+ * @details The dialog is modal. Edits are plain QLineEdits; the diff level is a QComboBox whose index equals
+ * SYW::diffLevel. The "Save to" combo box has the default file always and the document file only while
+ * SYW::DocConfigPath is set (a document is open); it starts on the document file in that case. Cancel changes
+ * nothing.
+ */
+void MainWindow::configure()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Configure SYW");
+    dlg.setMinimumWidth(640);
+    QFormLayout* form = new QFormLayout(&dlg);
+
+    auto field = [&](const QString& label, const std::string& value) {
+        QLineEdit* e = new QLineEdit(QString::fromUtf8(value.c_str()), &dlg);
+        form->addRow(label, e);
+        return e;
+    };
+    QLineEdit* server = field("Git server", syw.git_server);
+    QLineEdit* user = field("Git user", syw.git_user);
+    QLineEdit* repo = field("Git repository (this document)", syw.git_repo);
+    repo->setPlaceholderText("default: the repository's directory name");
+    // The directory name often differs from the repository name, so this stays editable for the document
+    // even after the remote exists (then it is only used if a remote has to be created again).
+    const bool hasRemote = !syw.RepoRoot.empty() && syw.HasRemote();
+    QLineEdit* editor = field("Editor command (%s = the document)", syw.editor);
+    QLineEdit* toMd = field("To Markdown (%s = path without .docx/.md)", syw.to_Markdown);
+
+    QComboBox* level = new QComboBox(&dlg);
+    level->addItems({"Word", "Line", "Paragraph"});     // index == SYW::diffLevel
+    level->setCurrentIndex(int(syw.DiffLevel));
+    form->addRow("Diff level", level);
+
+    QCheckBox* autoPush = new QCheckBox("Push after every commit (when a repository is set or a remote exists)", &dlg);
+    autoPush->setChecked(syw.auto_push);
+    form->addRow("Auto push", autoPush);
+
+    QComboBox* scope = new QComboBox(&dlg);
+    scope->addItem("Default for all documents (" + QString::fromUtf8(syw.DefaultConfigPath.c_str()) + ")",
+                   int(SYW::ConfigDefault));
+    if (!syw.DocConfigPath.empty()) {
+        scope->addItem("This document only (" + QString::fromUtf8(syw.DocConfigPath.c_str()) + ")",
+                       int(SYW::ConfigDocument));
+        scope->setCurrentIndex(1);
+    }
+    form->addRow("Save to", scope);
+
+    // The repository belongs to one document: editable only when saving to the document's file.
+    auto syncRepo = [=]() {
+        const bool doc = scope->currentData().toInt() == int(SYW::ConfigDocument);
+        repo->setEnabled(doc);
+        if (!doc) repo->setToolTip("The repository is per document; choose \"This document only\" to set it.");
+        else if (hasRemote) repo->setToolTip("This document already has a remote, which Push uses as it is. The name is used when a remote has to be created.");
+        else repo->setToolTip(QString());
+    };
+    connect(scope, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, syncRepo);
+    syncRepo();
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    syw.git_server = server->text().toUtf8().constData();
+    syw.git_user = user->text().toUtf8().constData();
+    syw.editor = editor->text().toUtf8().constData();
+    syw.to_Markdown = toMd->text().toUtf8().constData();
+    syw.DiffLevel = SYW::diffLevel(level->currentIndex());
+    syw.auto_push = autoPush->isChecked();
+    const SYW::configScope chosen = SYW::configScope(scope->currentData().toInt());
+    if (chosen == SYW::ConfigDocument) syw.git_repo = repo->text().toUtf8().constData();
+    if (syw.SaveConfig(chosen))
+        statusBar()->showMessage("Configuration saved", 5000);
+}
+
+/// @details SYW::Push() publishes its own errors; on success its summary line is shown for 10 seconds.
+void MainWindow::push()
+{
+    std::string summary;
+    statusBar()->showMessage("Pushing...");
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool ok = syw.Push(summary);
+    QApplication::restoreOverrideCursor();
+    if (ok) statusBar()->showMessage(QString::fromUtf8(summary.c_str()), 10000);
+    else statusBar()->clearMessage();
 }
 
 /**

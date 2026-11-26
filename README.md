@@ -85,6 +85,68 @@ renders the result in a separate, non-modal window, so several snapshots can be 
 is enabled by `MainWindow::updateViewActions()` only for a single Markdown file that exists in its commit.
 The viewer uses `QTextBrowser::setMarkdown()`, which renders CommonMark/GitHub-style Markdown.
 
+### Configuration
+
+Settings live in XML files with a `<SYW>` root, read and written with [XmlCls](https://github.com/dholstei/XmlCls)
+(`SYW.cpp`; XmlCls is not included from `SYW.h`):
+
+```xml
+<SYW>
+    <git_server>https://github.com</git_server>
+    <git_user>dholstei</git_user>
+    <git_repo>resume</git_repo>      <!-- per document; ~/.syw.xml has an empty <git_repo/> -->
+    <editor>flatpak run --command=libreoffice org.libreoffice.LibreOffice --writer "%s"</editor>
+    <to_Markdown>pandoc "%s.docx" -t markdown -o "%s.md"</to_Markdown>
+    <diffLevel>Line</diffLevel>
+    <auto_push value="1"/>           <!-- 0 = off, e.g. when working offline -->
+</SYW>
+```
+
+| File | Loaded by | Purpose |
+|------|-----------|---------|
+| `~/.syw.xml` | `SYW::LoadConfig()` in `main()`, before any document | Defaults. Created from the compiled-in values if missing. |
+| `<git dir>/.syw.xml` (`git rev-parse --absolute-git-dir`) | `SYW::LoadDocConfig()` inside `Open()`, before the editor is launched | Per-document overrides plus `<git_repo>`; inside `.git`, so never committed. |
+
+The server (`git_server`, `git_user`) is shared by all documents, but the repository is not: `<git_repo>` (`SYW::git_repo`) is
+given a value only in the per-document file; `~/.syw.xml` just declares an empty `<git_repo/>` (SaveConfig adds it if
+missing and never overwrites what is there), and in the Configure dialog it is editable only when
+"This document only" is chosen. If it is empty, the repository's directory name is used.
+
+Missing elements keep their value, unknown elements are ignored (and survive a save), `diffLevel` is
+`Word`, `Line` or `Paragraph` (case-insensitive). A broken file is reported and the previous values stay in force.
+**File > Configure...** (`MainWindow::configure()`) edits the values and calls `SYW::SaveConfig(scope)`,
+which writes all of them to the chosen file: an existing file is updated element by element with
+`XmlNode::parse()` / `AddChild()`, a new one is built with `XmlDoc(std::string)` and `Save(path)`. Saving as a default
+while a document has overrides writes the effective values.
+
+### Pushing
+
+**File > Push** (enabled while a document is open) calls `SYW::Push(summary)`; there is no confirmation.
+
+```
+git status -sb -uno                          first line gives branch...upstream [ahead N, behind M]
+  upstream, ahead 0     -> nothing to do ("Everything is pushed")
+  upstream, ahead > 0   -> git push
+  no upstream           -> remote = origin, else the first remote
+                           no remote at all -> git remote add origin <git_server>/<git_user>/<git_repo>.git   (repo = <git_repo> from .git/.syw.xml, else the directory name)
+                           git push -u <remote> <branch>
+```
+
+`main()` sets `GIT_TERMINAL_PROMPT=0` and the `Shell` hook has no terminal, so git cannot ask for a password:
+credentials must come from a credential helper or SSH keys, otherwise git's own message is shown. A detached HEAD or a
+repository with no commits is refused.
+
+### Auto push
+
+With `<auto_push value="1"/>` (`SYW::auto_push`, on by default; also accepts `true/false`, `yes/no`, `on/off`) every
+commit made by `Save()` is followed by `Push()` when a repository is associated with
+the document: `<git_repo>` is set (the first push then creates `origin`) or the repository already has a remote.
+A document with neither is left alone. A failed push is reported (the commit is safe) and the next commit tries
+again; set `value="0"` in `~/.syw.xml` or, for one document, in `.git/.syw.xml` while offline. In the Configure dialog
+the **Git repository** field is editable only for "This document only" (the directory name often differs from the
+repository name, so it stays editable after the first push; a remote that already exists is used by Push as it is); **Auto push** is a check box in either scope. Success is shown in the
+status bar through the `OnStatus` hook.
+
 ### Diffing two snapshots
 
 Select exactly two `.md` file nodes (Ctrl-click, usually the same file in two commits) and choose
@@ -159,15 +221,21 @@ Code that calls `Open()` or `Save()` can inspect `if (syw.err)` afterwards. In t
 
 ## Roadmap
 
+- **Windows build** (macOS after that). The code is Qt-portable; what needs work:
+  - Build system: the GNU `Makefile` assumes Linux paths and `g++`. Needs a Windows toolchain (MSVC or MinGW)
+    with Qt 6 for that compiler, and libxml2 (vcpkg, Conan or a local build; see the XmlCls README).
+  - `diff_match_patch.h`: its `enum Operation { DELETE, INSERT, EQUAL }` collides with the `DELETE` macro from
+    `<windows.h>`. Rename the enumerator in the submodule patch, or `#undef DELETE` before including it.
+  - XmlCls is POSIX-only as written: `gmtime_r`, `<unistd.h>`, `<sys/file.h>`/`flock` (`FileLock`), `fsync`-style
+    flushing and `access()` need Windows equivalents (`gmtime_s`, `LockFileEx`, `_commit`, `_access`).
+  - `fopen()` on a UTF-8 path fails for non-ASCII names (use `_wfopen` with the path converted by Qt), in `SYW::Open()`
+    and in the configuration-file checks.
+  - Default `editor` template (`flatpak ...`) is Linux-only; ship a per-platform default (LibreOffice's `soffice.exe`).
+  - Check quoting in the command templates under `QProcess::splitCommand()`, and git/pandoc being on `PATH`.
+  - Re-check the greyed-out menu entries (palette workaround in `MainWindow::buildMenu()`) on both platforms.
 - Actions on tree selections (checkout).
 - Git actions navigation: branches, diffs, timeline.
-- `git push` once a remote is configured (`git remote add origin <url>`).
 - Repository creation from the application.
 - **File > New**: create a new, empty DOCX in the same directory as the current document, then spawn a
   separate SYW process (`SYW --file <new.docx>`) with its own editor. One process per document matches the
   one-editor-per-session design of `SYW`, so the core does not change.
-- Configuration through [XmlCls](https://github.com/dholstei/XmlCls): defaults in `~/.syw.xml`, per-document
-  overrides in `.git/.syw.xml` (local to the clone, never committed). Planned settings include `git_server`,
-  `git_user`, the `editor` and `to_Markdown` templates and `diffLevel`.
-- Load `SYW::DiffLevel` (`enum SYW::diffLevel { Word, Line, Paragraph }`) from the configuration (`Paragraph` = blank-line separated blocks,
-  which equals `Line` when pandoc is run with `--wrap=none`).

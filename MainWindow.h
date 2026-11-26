@@ -32,6 +32,7 @@ class QTreeWidget;
  * | LaunchEditor      | the @ref editorProc QProcess                                |
  * | GetCommitMessage  | QInputDialog::getMultiLineText()                            |
  * | DiffHtml          | diff_match_patch on word/line/paragraph tokens, see DiffToHtml() |
+ * | HomeDir           | QDir::homePath()                                            |
  * | OnOpened/OnSaved  | enable/refresh the @ref tree, (re-)arm @ref watcher          |
  * | Quit              | QApplication::quit()                                        |
  *
@@ -44,6 +45,11 @@ class QTreeWidget;
  * the same file in different commits). The older one is found with SYW::OrderCommits(), the comparison is made
  * by SYW::DiffFiles() through the @ref SYW::DiffHtml hook (implemented here with diff_match_patch) at the
  * granularity SYW::DiffLevel, and shown in a popup window, again any number at once.
+ *
+ * @par File menu
+ * **File > Configure...** (configure()) edits the five settings of SYW (git server and user, editor and
+ * Markdown commands, diff level) and writes them to `~/.syw.xml` or, for the open document, to
+ * `<git dir>/.syw.xml`. **File > Push** (push()) runs SYW::Push(); it is enabled while a document is open.
  *
  * @par Lifecycle
  *  - **File > Open** calls SYW::Open(), which launches the editor.
@@ -107,9 +113,21 @@ private:
      * green, deletions red and struck through. Errors are published through `syw.err`.
      */
     void viewDiff();
+    /**
+     * @brief Show the settings dialog and save the result.
+     *
+     * One line edit per setting plus a combo box for the diff level, and a combo box choosing where to
+     * save: the default file (`~/.syw.xml`) or, when a document is open, that document's file (preselected).
+     * On OK the values are assigned to the SYW members, then SYW::SaveConfig() writes them. The editor
+     * command is used the next time a file is opened; the others take effect immediately.
+     */
+    void configure();
+    /// Run SYW::Push() and show its one-line result in the status bar (errors are published by SYW).
+    void push();
 
     SYW& syw;                       ///< The session being driven.
     QAction* viewDocumentAct;       ///< **View > Document**; enabled by updateViewActions().
+    QAction* pushAct;               ///< **File > Push**; enabled while a document is open.
     QAction* viewDiffAct;           ///< **View > Diff**; enabled by updateViewActions().
     QTreeWidget* tree;              ///< Branch > commit > file tree; enabled only while an editor is running.
     QProcess editorProc;            ///< The external editor process.
